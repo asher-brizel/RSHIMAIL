@@ -1,9 +1,9 @@
-name: Sync Gmail to API
+name: Sync Gmail to API with Files
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # רץ כל 30 דקות
-  workflow_dispatch:      # מאפשר הרצה ידנית
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -18,11 +18,12 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests cloudinary
 
       - name: Run sync script
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           API_KEY: ${{ secrets.API_KEY }}
+          CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
         run: python sync_emails.py
