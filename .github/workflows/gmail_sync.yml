@@ -1,0 +1,28 @@
+name: Sync Gmail to API
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # רץ כל 30 דקות
+  workflow_dispatch:      # מאפשר הרצה ידנית
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run sync script
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: python sync_emails.py
