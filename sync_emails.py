@@ -12,7 +12,7 @@ GMAIL_PASS = os.getenv("GMAIL_PASS")
 API_KEY = os.getenv("API_KEY")
 APP_ID = os.getenv("APP_ID")
 
-# שינוי הכתובות לשרת המקומי שלכם כדי למנוע 404
+# שימוש בדומיין הישיר שלכם
 BASE_DOMAIN = "kehilnet.base44.app"
 UPLOAD_URL = f"https://{BASE_DOMAIN}/api/integrations/Core/UploadFile"
 ANNOUNCEMENT_URL = f"https://{BASE_DOMAIN}/api/entities/Announcement"
@@ -31,10 +31,13 @@ def decode_mime_header(s):
     return "".join(decoded_parts)
 
 def clean_title(title):
-    """מסיר סוגריים מרובעים או עגולים עם שם השולח בתחילת הכותרת"""
-    # מוריד [טקסט] או (טקסט) בתחילת המשפט
     cleaned = re.sub(r'^(\[.*?\]|\(.*?\))\s*', '', title)
     return cleaned.strip()
+
+def clean_filename(filename):
+    """מנקה שם קובץ לתווים בסיסיים בלבד כדי למנוע שגיאה 400 בהעלאה"""
+    name = re.sub(r'[^\w\s.-]', '', filename)
+    return name.strip() or "attachment"
 
 def clean_signature(text):
     if not text: return ""
@@ -46,26 +49,30 @@ def clean_signature(text):
 
 def upload_file_to_base44(file_data, file_name):
     try:
-        # שימוש ב-Authorization כפי שמופיע במדריך ששלחת
-        headers = {"Authorization": f"Bearer {API_KEY}"}
-        files = {'file': (file_name, file_data)}
+        # חזרה לשיטת ה-api_key המקורית
+        headers = {"api_key": API_KEY}
+        
+        # ניקוי שם הקובץ לצורך ההעלאה הטכנית
+        safe_name = clean_filename(file_name)
+        if not safe_name.count('.'): # הוספת סיומת אם נמחקה
+            ext = mimetypes.guess_extension(mimetypes.guess_type(file_name)[0] or "") or ".dat"
+            safe_name += ext
+
+        files = {'file': (safe_name, file_data)}
         response = requests.post(UPLOAD_URL, headers=headers, files=files)
         
         if response.status_code in [200, 201]:
-            # אם השרת מחזיר file_url או url
             data = response.json()
-            url = data.get("file_url") or data.get("url")
-            print(f"-> File uploaded: {file_name} -> {url}")
-            return url
+            return data.get("file_url") or data.get("url")
         else:
-            print(f"-> Upload FAILED for {file_name}. Status: {response.status_code}")
+            print(f"-> Upload FAILED for {file_name}. Status: {response.status_code}, Body: {response.text}")
             return None
     except Exception as e:
-        print(f"-> Upload Exception for {file_name}: {e}")
+        print(f"-> Upload Exception: {e}")
         return None
 
 def sync():
-    print(f"Connecting to Gmail as {GMAIL_USER}...")
+    print(f"Connecting to Gmail...")
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(GMAIL_USER, GMAIL_PASS)
@@ -76,7 +83,7 @@ def sync():
     mail.select(LABEL)
     _, search_data = mail.search(None, 'ALL')
     email_ids = search_data[0].split()
-    print(f"Found {len(email_ids)} emails in label '{LABEL}'.")
+    print(f"Found {len(email_ids)} emails.")
     
     for num in email_ids:
         _, data = mail.fetch(num, '(RFC822)')
@@ -112,7 +119,7 @@ def sync():
                             mime_type, _ = mimetypes.guess_type(f_name)
                             attachments_list.append({
                                 "url": file_url,
-                                "name": f_name,
+                                "name": f_name, # כאן נשמור על השם המקורי בעברית לתצוגה
                                 "type": mime_type or "application/octet-stream"
                             })
                             if f_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and not primary_image:
@@ -130,9 +137,9 @@ def sync():
             "attachments": attachments_list
         }
 
-        # שימוש ב-Authorization כפי שמופיע במדריך
+        # חזרה לשיטת ה-api_key ב-Header
         headers = {
-            "Authorization": f"Bearer {API_KEY}",
+            "api_key": API_KEY,
             "Content-Type": "application/json"
         }
         
