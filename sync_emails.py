@@ -12,7 +12,6 @@ GMAIL_PASS = os.getenv("GMAIL_PASS")
 API_KEY = os.getenv("API_KEY")
 APP_ID = os.getenv("APP_ID")
 
-# שימוש בדומיין הישיר שלכם
 BASE_DOMAIN = "kehilnet.base44.app"
 UPLOAD_URL = f"https://{BASE_DOMAIN}/api/integrations/Core/UploadFile"
 ANNOUNCEMENT_URL = f"https://{BASE_DOMAIN}/api/entities/Announcement"
@@ -35,9 +34,11 @@ def clean_title(title):
     return cleaned.strip()
 
 def clean_filename(filename):
-    """מנקה שם קובץ לתווים בסיסיים בלבד כדי למנוע שגיאה 400 בהעלאה"""
+    """מנקה את שם הקובץ לתווים לטיניים כדי למנוע שגיאה 400 בשרת"""
     name = re.sub(r'[^\w\s.-]', '', filename)
-    return name.strip() or "attachment"
+    if not name.strip():
+        return "attachment"
+    return name.strip()
 
 def clean_signature(text):
     if not text: return ""
@@ -49,12 +50,16 @@ def clean_signature(text):
 
 def upload_file_to_base44(file_data, file_name):
     try:
-        # חזרה לשיטת ה-api_key המקורית
-        headers = {"api_key": API_KEY}
+        # כאן הוספתי את ה-X-App-Id שהיה חסר ב-Logs
+        headers = {
+            "api_key": API_KEY,
+            "X-App-Id": APP_ID
+        }
         
-        # ניקוי שם הקובץ לצורך ההעלאה הטכנית
+        # יצירת שם קובץ בטוח להעלאה הטכנית
         safe_name = clean_filename(file_name)
-        if not safe_name.count('.'): # הוספת סיומת אם נמחקה
+        # וודוא שיש סיומת קובץ
+        if '.' not in safe_name:
             ext = mimetypes.guess_extension(mimetypes.guess_type(file_name)[0] or "") or ".dat"
             safe_name += ext
 
@@ -63,12 +68,13 @@ def upload_file_to_base44(file_data, file_name):
         
         if response.status_code in [200, 201]:
             data = response.json()
-            return data.get("file_url") or data.get("url")
+            # מחלץ את הלינק - מנסה כמה שמות שדות נפוצים
+            return data.get("file_url") or data.get("url") or data.get("path")
         else:
             print(f"-> Upload FAILED for {file_name}. Status: {response.status_code}, Body: {response.text}")
             return None
     except Exception as e:
-        print(f"-> Upload Exception: {e}")
+        print(f"-> Upload Exception for {file_name}: {e}")
         return None
 
 def sync():
@@ -119,7 +125,7 @@ def sync():
                             mime_type, _ = mimetypes.guess_type(f_name)
                             attachments_list.append({
                                 "url": file_url,
-                                "name": f_name, # כאן נשמור על השם המקורי בעברית לתצוגה
+                                "name": f_name, # שם המקור בעברית נשמר כאן
                                 "type": mime_type or "application/octet-stream"
                             })
                             if f_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and not primary_image:
@@ -137,9 +143,9 @@ def sync():
             "attachments": attachments_list
         }
 
-        # חזרה לשיטת ה-api_key ב-Header
         headers = {
             "api_key": API_KEY,
+            "X-App-Id": APP_ID,
             "Content-Type": "application/json"
         }
         
