@@ -20,25 +20,51 @@ LABEL = "Rshimail"
 
 def decode_mime_header(s):
     if not s: return ""
-    parts = decode_header(s)
-    decoded_parts = []
-    for content, encoding in parts:
-        if isinstance(content, bytes):
-            decoded_parts.append(content.decode(encoding or 'utf-8', errors='ignore'))
-        else:
-            decoded_parts.append(content)
-    return "".join(decoded_parts)
+    try:
+        parts = decode_header(s)
+        decoded_parts = []
+        for content, encoding in parts:
+            if isinstance(content, bytes):
+                decoded_parts.append(content.decode(encoding or 'utf-8', errors='ignore'))
+            else:
+                decoded_parts.append(content)
+        return "".join(decoded_parts)
+    except:
+        return str(s)
 
 def clean_title(title):
+    """מסיר סוגריים מרובעים/עגולים בתחילת הכותרת"""
     cleaned = re.sub(r'^(\[.*?\]|\(.*?\))\s*', '', title)
     return cleaned.strip()
 
 def clean_filename(filename):
-    """מנקה את שם הקובץ לתווים לטיניים כדי למנוע שגיאה 400 בשרת"""
+    """שם קובץ טכני להעלאה (ללא תווים מיוחדים)"""
     name = re.sub(r'[^\w\s.-]', '', filename)
-    if not name.strip():
-        return "attachment"
-    return name.strip()
+    return name.strip() or "file"
+
+def extract_drive_links(text):
+    """מחפש קישורי Google Drive בטקסט ומחזיר רשימת אובייקטים של Attachments"""
+    links = []
+    # מחפש קישורי docs.google.com
+    drive_pattern = r'https://docs\.google\.com/[^\s<>"]+'
+    found_urls = re.findall(drive_pattern, text)
+    
+    # ניקוי כפילויות ושמירה על הסדר
+    seen = set()
+    for url in found_urls:
+        if url not in seen:
+            # מנסה למצוא תיאור קצר לפני הקישור (אופציונלי)
+            name = "קישור למסמך גוגל"
+            if "document" in url: name = "מסמך Google Docs"
+            elif "forms" in url: name = "טופס Google Forms"
+            
+            links.append({
+                "url": url,
+                "name": name,
+                "type": "text/html"
+            })
+            seen.add(url)
+    return links[:2] # לוקח את 2 הקישורים הראשונים כפי שביקשת
 
 def clean_signature(text):
     if not text: return ""
@@ -50,15 +76,8 @@ def clean_signature(text):
 
 def upload_file_to_base44(file_data, file_name):
     try:
-        # כאן הוספתי את ה-X-App-Id שהיה חסר ב-Logs
-        headers = {
-            "api_key": API_KEY,
-            "X-App-Id": APP_ID
-        }
-        
-        # יצירת שם קובץ בטוח להעלאה הטכנית
+        headers = {"api_key": API_KEY, "X-App-Id": APP_ID}
         safe_name = clean_filename(file_name)
-        # וודוא שיש סיומת קובץ
         if '.' not in safe_name:
             ext = mimetypes.guess_extension(mimetypes.guess_type(file_name)[0] or "") or ".dat"
             safe_name += ext
@@ -67,14 +86,10 @@ def upload_file_to_base44(file_data, file_name):
         response = requests.post(UPLOAD_URL, headers=headers, files=files)
         
         if response.status_code in [200, 201]:
-            data = response.json()
-            # מחלץ את הלינק - מנסה כמה שמות שדות נפוצים
-            return data.get("file_url") or data.get("url") or data.get("path")
-        else:
-            print(f"-> Upload FAILED for {file_name}. Status: {response.status_code}, Body: {response.text}")
-            return None
+            return response.json().get("file_url") or response.json().get("url")
+        return None
     except Exception as e:
-        print(f"-> Upload Exception for {file_name}: {e}")
+        print(f"DEBUG: Upload error: {e}")
         return None
 
 def sync():
@@ -89,20 +104,19 @@ def sync():
     mail.select(LABEL)
     _, search_data = mail.search(None, 'ALL')
     email_ids = search_data[0].split()
-    print(f"Found {len(email_ids)} emails.")
     
     for num in email_ids:
         _, data = mail.fetch(num, '(RFC822)')
         msg = email.message_from_bytes(data[0][1])
         
-        raw_subject = decode_mime_header(msg["Subject"])
-        subject = clean_title(raw_subject)
+        subject = clean_title(decode_mime_header(msg["Subject"]))
         print(f"Processing: {subject}")
         
         content = ""
         attachments_list = []
         primary_image = ""
 
+        # חילוץ תוכן וקבצים
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
@@ -111,6 +125,8 @@ def sync():
                 if content_type == "text/plain" and "attachment" not in content_disposition:
                     try:
                         raw_text = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        # מחלצים קישורי דרייב לפני שמנקים את החתימה
+                        attachments_list.extend(extract_drive_links(raw_text))
                         content = clean_signature(raw_text)
                     except: continue
                 
@@ -125,15 +141,17 @@ def sync():
                             mime_type, _ = mimetypes.guess_type(f_name)
                             attachments_list.append({
                                 "url": file_url,
-                                "name": f_name, # שם המקור בעברית נשמר כאן
+                                "name": f_name,
                                 "type": mime_type or "application/octet-stream"
                             })
                             if f_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and not primary_image:
                                 primary_image = file_url
         else:
             raw_text = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+            attachments_list.extend(extract_drive_links(raw_text))
             content = clean_signature(raw_text)
 
+        # יצירת ההודעה
         payload = {
             "title": subject,
             "content": content if content else "",
@@ -143,19 +161,14 @@ def sync():
             "attachments": attachments_list
         }
 
-        headers = {
-            "api_key": API_KEY,
-            "X-App-Id": APP_ID,
-            "Content-Type": "application/json"
-        }
-        
+        headers = {"api_key": API_KEY, "X-App-Id": APP_ID, "Content-Type": "application/json"}
         response = requests.post(ANNOUNCEMENT_URL, headers=headers, json=payload)
         
         if response.status_code in [200, 201]:
-            print(f"SUCCESS: Announcement created.")
+            print(f"SUCCESS: {subject} synced with {len(attachments_list)} attachments.")
             mail.store(num, '+FLAGS', '\\Deleted')
         else:
-            print(f"ERROR: Sync failed. Status: {response.status_code}, Body: {response.text}")
+            print(f"ERROR: Status {response.status_code}")
 
     mail.expunge()
     mail.logout()
