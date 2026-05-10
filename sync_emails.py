@@ -6,20 +6,17 @@ import os
 import mimetypes
 import re
 
-# הגדרות סביבה (נלקחות מה-GitHub Secrets)
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_PASS = os.getenv("GMAIL_PASS")
 API_KEY = os.getenv("API_KEY")
 APP_ID = os.getenv("APP_ID")
 
-# כתובות ה-API של בייס44
 UPLOAD_URL = "https://api.base44.com/api/integrations/Core/UploadFile"
 ANNOUNCEMENT_URL = f"https://api.base44.com/api/apps/{APP_ID}/entities/Announcement"
 
-LABEL = "Rshimail" # שם התווית באנגלית בג'ימייל
+LABEL = "Rshimail"
 
 def decode_mime_header(s):
-    """פענוח עברית בכותרות ושמות קבצים"""
     if not s: return ""
     parts = decode_header(s)
     decoded_parts = []
@@ -31,66 +28,61 @@ def decode_mime_header(s):
     return "".join(decoded_parts)
 
 def clean_title(title):
-    """מסיר את שם השולח בסוגריים מהכותרת, למשל [רשימייל אנ\"ש]"""
     cleaned = re.sub(r'^\[.*?\]\s*', '', title)
     return cleaned.strip()
 
 def clean_signature(text):
-    """מסיר חתימות וקישורי מערכת מיותרים מגוף המייל"""
     if not text: return ""
-    markers = [
-        "רשימייל אנ\"ש - לוח המודעות",
-        "ניתן להשיב לכתובת",
-        "---",
-        "-- ",
-        "________________",
-        "ניתן להצטרף לקבוצה",
-        "Google Groups"
-    ]
+    markers = ["רשימייל אנ\"ש - לוח המודעות", "ניתן להשיב לכתובת", "---", "-- ", "________________", "Google Groups"]
     for marker in markers:
         if marker in text:
             text = text.split(marker)[0]
     return text.strip()
 
 def upload_file_to_base44(file_data, file_name):
-    """מעלה קובץ גולמי ומחזיר את ה-URL שלו מהשרת"""
     try:
         headers = {"Authorization": f"Bearer {API_KEY}"}
         files = {'file': (file_name, file_data)}
         response = requests.post(UPLOAD_URL, headers=headers, files=files)
         
         if response.status_code in [200, 201]:
-            return response.json().get("file_url")
+            url = response.json().get("file_url")
+            print(f"-> File uploaded: {file_name} -> {url}")
+            return url
         else:
-            print(f"DEBUG: Upload failed for {file_name}. Status: {response.status_code}")
+            print(f"-> Upload FAILED for {file_name}: {response.text}")
             return None
     except Exception as e:
-        print(f"DEBUG: Upload error: {e}")
+        print(f"-> Upload Exception: {e}")
         return None
 
 def sync():
+    print(f"Connecting to Gmail as {GMAIL_USER}...")
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(GMAIL_USER, GMAIL_PASS)
+        print("Gmail Login Successful.")
     except Exception as e:
-        print(f"Login failed: {e}")
+        print(f"Gmail Login failed: {e}")
         return
 
-    # בחירת התווית
     status, _ = mail.select(LABEL)
     if status != 'OK':
-        print(f"Label '{LABEL}' not found.")
+        print(f"CRITICAL: Label '{LABEL}' not found in Gmail! Make sure you renamed the label to Rshimail.")
         return
 
     _, search_data = mail.search(None, 'ALL')
+    email_ids = search_data[0].split()
+    print(f"Found {len(email_ids)} emails in label '{LABEL}'.")
     
-    for num in search_data[0].split():
+    for num in email_ids:
+        print(f"Processing email ID: {num.decode()}...")
         _, data = mail.fetch(num, '(RFC822)')
         msg = email.message_from_bytes(data[0][1])
         
-        # כותרת נקייה
         raw_subject = decode_mime_header(msg["Subject"])
         subject = clean_title(raw_subject)
+        print(f"Subject: {subject}")
         
         content = ""
         attachments_list = []
@@ -101,20 +93,17 @@ def sync():
                 content_type = part.get_content_type()
                 content_disposition = str(part.get("Content-Disposition"))
 
-                # טקסט
                 if content_type == "text/plain" and "attachment" not in content_disposition:
                     try:
                         raw_text = part.get_payload(decode=True).decode('utf-8', errors='ignore')
                         content = clean_signature(raw_text)
                     except: continue
                 
-                # קבצים
                 elif "attachment" in content_disposition or part.get_filename():
                     f_name_raw = part.get_filename()
                     if f_name_raw:
                         f_name = decode_mime_header(f_name_raw)
                         f_data = part.get_payload(decode=True)
-                        
                         file_url = upload_file_to_base44(f_data, f_name)
                         
                         if file_url:
@@ -124,15 +113,12 @@ def sync():
                                 "name": f_name,
                                 "type": mime_type or "application/octet-stream"
                             })
-                            
-                            # שמירת התמונה הראשונה לצורך תצוגה מקדימה
                             if f_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and not primary_image:
                                 primary_image = file_url
         else:
             raw_text = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
             content = clean_signature(raw_text)
 
-        # בניית ה-Payload הסופי
         payload = {
             "title": subject,
             "content": content if content else "",
@@ -147,17 +133,18 @@ def sync():
             "Content-Type": "application/json"
         }
         
+        print(f"Sending Announcement to Base44...")
         response = requests.post(ANNOUNCEMENT_URL, headers=headers, json=payload)
         
         if response.status_code in [200, 201]:
-            print(f"SUCCESS: {subject} synced.")
-            # סימון למחיקה מהתווית בג'ימייל
+            print(f"SUCCESS: Announcement created. Server returned: {response.text}")
             mail.store(num, '+FLAGS', '\\Deleted')
         else:
-            print(f"ERROR: Sync failed for {subject}. Status: {response.status_code}")
+            print(f"ERROR: Base44 rejected the announcement. Status: {response.status_code}, Body: {response.text}")
 
     mail.expunge()
     mail.logout()
+    print("Done.")
 
 if __name__ == "__main__":
     sync()
