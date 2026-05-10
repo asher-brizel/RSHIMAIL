@@ -6,13 +6,16 @@ import os
 import mimetypes
 import re
 
+# הגדרות מה-GitHub Secrets
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_PASS = os.getenv("GMAIL_PASS")
 API_KEY = os.getenv("API_KEY")
 APP_ID = os.getenv("APP_ID")
 
-UPLOAD_URL = "https://api.base44.com/api/integrations/Core/UploadFile"
-ANNOUNCEMENT_URL = f"https://api.base44.com/api/apps/{APP_ID}/entities/Announcement"
+# שינוי הכתובות לשרת המקומי שלכם כדי למנוע 404
+BASE_DOMAIN = "kehilnet.base44.app"
+UPLOAD_URL = f"https://{BASE_DOMAIN}/api/integrations/Core/UploadFile"
+ANNOUNCEMENT_URL = f"https://{BASE_DOMAIN}/api/entities/Announcement"
 
 LABEL = "Rshimail"
 
@@ -28,7 +31,9 @@ def decode_mime_header(s):
     return "".join(decoded_parts)
 
 def clean_title(title):
-    cleaned = re.sub(r'^\[.*?\]\s*', '', title)
+    """מסיר סוגריים מרובעים או עגולים עם שם השולח בתחילת הכותרת"""
+    # מוריד [טקסט] או (טקסט) בתחילת המשפט
+    cleaned = re.sub(r'^(\[.*?\]|\(.*?\))\s*', '', title)
     return cleaned.strip()
 
 def clean_signature(text):
@@ -41,19 +46,22 @@ def clean_signature(text):
 
 def upload_file_to_base44(file_data, file_name):
     try:
+        # שימוש ב-Authorization כפי שמופיע במדריך ששלחת
         headers = {"Authorization": f"Bearer {API_KEY}"}
         files = {'file': (file_name, file_data)}
         response = requests.post(UPLOAD_URL, headers=headers, files=files)
         
         if response.status_code in [200, 201]:
-            url = response.json().get("file_url")
+            # אם השרת מחזיר file_url או url
+            data = response.json()
+            url = data.get("file_url") or data.get("url")
             print(f"-> File uploaded: {file_name} -> {url}")
             return url
         else:
-            print(f"-> Upload FAILED for {file_name}: {response.text}")
+            print(f"-> Upload FAILED for {file_name}. Status: {response.status_code}")
             return None
     except Exception as e:
-        print(f"-> Upload Exception: {e}")
+        print(f"-> Upload Exception for {file_name}: {e}")
         return None
 
 def sync():
@@ -61,28 +69,22 @@ def sync():
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(GMAIL_USER, GMAIL_PASS)
-        print("Gmail Login Successful.")
     except Exception as e:
         print(f"Gmail Login failed: {e}")
         return
 
-    status, _ = mail.select(LABEL)
-    if status != 'OK':
-        print(f"CRITICAL: Label '{LABEL}' not found in Gmail! Make sure you renamed the label to Rshimail.")
-        return
-
+    mail.select(LABEL)
     _, search_data = mail.search(None, 'ALL')
     email_ids = search_data[0].split()
     print(f"Found {len(email_ids)} emails in label '{LABEL}'.")
     
     for num in email_ids:
-        print(f"Processing email ID: {num.decode()}...")
         _, data = mail.fetch(num, '(RFC822)')
         msg = email.message_from_bytes(data[0][1])
         
         raw_subject = decode_mime_header(msg["Subject"])
         subject = clean_title(raw_subject)
-        print(f"Subject: {subject}")
+        print(f"Processing: {subject}")
         
         content = ""
         attachments_list = []
@@ -128,19 +130,19 @@ def sync():
             "attachments": attachments_list
         }
 
+        # שימוש ב-Authorization כפי שמופיע במדריך
         headers = {
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json"
         }
         
-        print(f"Sending Announcement to Base44...")
         response = requests.post(ANNOUNCEMENT_URL, headers=headers, json=payload)
         
         if response.status_code in [200, 201]:
-            print(f"SUCCESS: Announcement created. Server returned: {response.text}")
+            print(f"SUCCESS: Announcement created.")
             mail.store(num, '+FLAGS', '\\Deleted')
         else:
-            print(f"ERROR: Base44 rejected the announcement. Status: {response.status_code}, Body: {response.text}")
+            print(f"ERROR: Sync failed. Status: {response.status_code}, Body: {response.text}")
 
     mail.expunge()
     mail.logout()
