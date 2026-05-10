@@ -13,7 +13,7 @@ API_KEY = os.getenv("API_KEY")
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL") # פורמט: cloudinary://key:secret@name
 
 API_URL = "https://kehilnet.base44.app/api/entities/Announcement"
-LABEL = "רשימייל"
+LABEL = "Rshimail"
 
 # אתחול Cloudinary
 cloudinary.config(cloudinary_url=CLOUDINARY_URL)
