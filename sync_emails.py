@@ -3,18 +3,20 @@ import email
 from email.header import decode_header
 import requests
 import os
+import mimetypes
+import re
 
-# הגדרות מה-GitHub Secrets
+# הגדרות סביבה (נלקחות מה-GitHub Secrets)
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_PASS = os.getenv("GMAIL_PASS")
 API_KEY = os.getenv("API_KEY")
+APP_ID = os.getenv("APP_ID")
 
 # כתובות ה-API של בייס44
-BASE_URL = "https://kehilnet.base44.app/api"
-ANNOUNCEMENT_URL = f"{BASE_URL}/entities/Announcement"
-UPLOAD_URL = f"{BASE_URL}/upload" # כאן מתבצעת העלאת הקובץ
+UPLOAD_URL = "https://api.base44.com/api/integrations/Core/UploadFile"
+ANNOUNCEMENT_URL = f"https://api.base44.com/api/apps/{APP_ID}/entities/Announcement"
 
-LABEL = "Rshimail"
+LABEL = "Rshimail" # שם התווית באנגלית בג'ימייל
 
 def decode_mime_header(s):
     """פענוח עברית בכותרות ושמות קבצים"""
@@ -28,32 +30,42 @@ def decode_mime_header(s):
             decoded_parts.append(content)
     return "".join(decoded_parts)
 
+def clean_title(title):
+    """מסיר את שם השולח בסוגריים מהכותרת, למשל [רשימייל אנ\"ש]"""
+    cleaned = re.sub(r'^\[.*?\]\s*', '', title)
+    return cleaned.strip()
+
 def clean_signature(text):
-    """ניקוי חתימות מהמייל"""
+    """מסיר חתימות וקישורי מערכת מיותרים מגוף המייל"""
     if not text: return ""
-    markers = ["רשימייל אנ\"ש - לוח המודעות", "ניתן להשיב לכתובת", "---", "-- ", "________________", "Google Groups"]
+    markers = [
+        "רשימייל אנ\"ש - לוח המודעות",
+        "ניתן להשיב לכתובת",
+        "---",
+        "-- ",
+        "________________",
+        "ניתן להצטרף לקבוצה",
+        "Google Groups"
+    ]
     for marker in markers:
         if marker in text:
             text = text.split(marker)[0]
     return text.strip()
 
 def upload_file_to_base44(file_data, file_name):
-    """מעלה קובץ גולמי לבייס44 ומחזיר את ה-URL שלו"""
+    """מעלה קובץ גולמי ומחזיר את ה-URL שלו מהשרת"""
     try:
-        headers = {"api_key": API_KEY}
-        # שליחת הקובץ כ-multipart/form-data
+        headers = {"Authorization": f"Bearer {API_KEY}"}
         files = {'file': (file_name, file_data)}
         response = requests.post(UPLOAD_URL, headers=headers, files=files)
         
         if response.status_code in [200, 201]:
-            # בייס44 מחזיר בד"כ אובייקט JSON עם שדה url או path
-            data = response.json()
-            return data.get("url") or data.get("path")
+            return response.json().get("file_url")
         else:
-            print(f"DEBUG: Upload failed for {file_name}. Status: {response.status_code}, Response: {response.text}")
+            print(f"DEBUG: Upload failed for {file_name}. Status: {response.status_code}")
             return None
     except Exception as e:
-        print(f"DEBUG: Error during upload of {file_name}: {e}")
+        print(f"DEBUG: Upload error: {e}")
         return None
 
 def sync():
@@ -61,74 +73,77 @@ def sync():
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(GMAIL_USER, GMAIL_PASS)
     except Exception as e:
-        print(f"Gmail Login failed: {e}")
+        print(f"Login failed: {e}")
         return
 
-    mail.select(LABEL)
+    # בחירת התווית
+    status, _ = mail.select(LABEL)
+    if status != 'OK':
+        print(f"Label '{LABEL}' not found.")
+        return
+
     _, search_data = mail.search(None, 'ALL')
     
     for num in search_data[0].split():
         _, data = mail.fetch(num, '(RFC822)')
         msg = email.message_from_bytes(data[0][1])
         
-        subject = decode_mime_header(msg["Subject"])
+        # כותרת נקייה
+        raw_subject = decode_mime_header(msg["Subject"])
+        subject = clean_title(raw_subject)
+        
         content = ""
         attachments_list = []
         primary_image = ""
 
-        # סריקת חלקי המייל
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
                 content_disposition = str(part.get("Content-Disposition"))
 
-                # 1. חילוץ טקסט
+                # טקסט
                 if content_type == "text/plain" and "attachment" not in content_disposition:
                     try:
                         raw_text = part.get_payload(decode=True).decode('utf-8', errors='ignore')
                         content = clean_signature(raw_text)
                     except: continue
                 
-                # 2. חילוץ קבצים ותמונות
+                # קבצים
                 elif "attachment" in content_disposition or part.get_filename():
                     f_name_raw = part.get_filename()
                     if f_name_raw:
                         f_name = decode_mime_header(f_name_raw)
                         f_data = part.get_payload(decode=True)
                         
-                        # העלאה ישירה לשרת בייס44
                         file_url = upload_file_to_base44(f_data, f_name)
                         
                         if file_url:
-                            # הוספה למערך ה-attachments החדש
+                            mime_type, _ = mimetypes.guess_type(f_name)
                             attachments_list.append({
                                 "url": file_url,
-                                "name": f_name
+                                "name": f_name,
+                                "type": mime_type or "application/octet-stream"
                             })
-                            # אם זו תמונה, נעדכן גם את image_url
+                            
+                            # שמירת התמונה הראשונה לצורך תצוגה מקדימה
                             if f_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and not primary_image:
                                 primary_image = file_url
-
         else:
             raw_text = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
             content = clean_signature(raw_text)
 
-        # בניית ה-Payload לפי הסכימה המעודכנת
+        # בניית ה-Payload הסופי
         payload = {
             "title": subject,
-            "content": content if content else "", # נשאר ריק אם אין טקסט
+            "content": content if content else "",
             "priority": "רגילה",
+            "pinned": False,
             "image_url": primary_image,
             "attachments": attachments_list
         }
-        
-        # תאימות לאחור (שדות ישנים)
-        if attachments_list:
-            payload["file_url"] = attachments_list[0]["url"]
-            payload["file_name"] = attachments_list[0]["name"]
 
         headers = {
-            "api_key": API_KEY,
+            "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json"
         }
         
@@ -136,10 +151,10 @@ def sync():
         
         if response.status_code in [200, 201]:
             print(f"SUCCESS: {subject} synced.")
-            # סימון למחיקה מהתווית
+            # סימון למחיקה מהתווית בג'ימייל
             mail.store(num, '+FLAGS', '\\Deleted')
         else:
-            print(f"ERROR: Failed to sync {subject}. Status: {response.status_code}, Info: {response.text}")
+            print(f"ERROR: Sync failed for {subject}. Status: {response.status_code}")
 
     mail.expunge()
     mail.logout()
