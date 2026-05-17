@@ -1,0 +1,35 @@
+name: Unified Kehilnet Sync Pipeline
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # רץ כל 30 דקות
+  workflow_dispatch:      # מאפשר הפעלה ידנית בלחיצת כפתור
+
+jobs:
+  sync-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System and Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests playwright
+
+      - name: Install Playwright Chromium Browser
+        run: |
+          playwright install chromium --with-deps
+
+      - name: Run Unified Sync Script
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          API_KEY: ${{ secrets.API_KEY }}
+          APP_ID: ${{ secrets.APP_ID }}
+        run: python sync_all.py
