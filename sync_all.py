@@ -1,10 +1,12 @@
+import os
+import re
 import imaplib
 import email
 from email.header import decode_header
 import requests
-import os
 import mimetypes
-import re
+import urllib.parse
+from playwright.sync_api import sync_playwright
 
 # הגדרות מה-GitHub Secrets
 GMAIL_USER = os.getenv("GMAIL_USER")
@@ -15,8 +17,14 @@ APP_ID = os.getenv("APP_ID")
 BASE_DOMAIN = "kehilnet.base44.app"
 UPLOAD_URL = f"https://{BASE_DOMAIN}/api/integrations/Core/UploadFile"
 ANNOUNCEMENT_URL = f"https://{BASE_DOMAIN}/api/entities/Announcement"
+PAYMENT_FORMS_URL = f"https://{BASE_DOMAIN}/api/entities/PaymentForms"
 
 LABEL = "Rshimail"
+NEDARIM_URL = "https://www.matara.pro/nedarimplus/online/?mosad=7004882"
+
+# ==========================================
+# קוד עזר ועיבוד טקסט (Gmail & Forms)
+# ==========================================
 
 def decode_mime_header(s):
     if not s: return ""
@@ -33,27 +41,21 @@ def decode_mime_header(s):
         return str(s)
 
 def clean_title(title):
-    """מסיר סוגריים מרובעים/עגולים בתחילת הכותרת"""
     cleaned = re.sub(r'^(\[.*?\]|\(.*?\))\s*', '', title)
     return cleaned.strip()
 
 def clean_filename(filename):
-    """שם קובץ טכני להעלאה (ללא תווים מיוחדים)"""
     name = re.sub(r'[^\w\s.-]', '', filename)
     return name.strip() or "file"
 
 def extract_drive_links(text):
-    """מחפש קישורי Google Drive בטקסט ומחזיר רשימת אובייקטים של Attachments"""
     links = []
-    # מחפש קישורי docs.google.com
     drive_pattern = r'https://docs\.google\.com/[^\s<>"]+'
     found_urls = re.findall(drive_pattern, text)
     
-    # ניקוי כפילויות ושמירה על הסדר
     seen = set()
     for url in found_urls:
         if url not in seen:
-            # מנסה למצוא תיאור קצר לפני הקישור (אופציונלי)
             name = "קישור למסמך גוגל"
             if "document" in url: name = "מסמך Google Docs"
             elif "forms" in url: name = "טופס Google Forms"
@@ -64,7 +66,7 @@ def extract_drive_links(text):
                 "type": "text/html"
             })
             seen.add(url)
-    return links[:2] # לוקח את 2 הקישורים הראשונים כפי שביקשת
+    return links[:2]
 
 def clean_signature(text):
     if not text: return ""
@@ -73,6 +75,10 @@ def clean_signature(text):
         if marker in text:
             text = text.split(marker)[0]
     return text.strip()
+
+# ==========================================
+# לוגיקת סנכרון Gmail -> Announcements
+# ==========================================
 
 def upload_file_to_base44(file_data, file_name):
     try:
@@ -92,8 +98,8 @@ def upload_file_to_base44(file_data, file_name):
         print(f"DEBUG: Upload error: {e}")
         return None
 
-def sync():
-    print(f"Connecting to Gmail...")
+def sync_gmail_announcements():
+    print("--- Starting Gmail Sync ---")
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(GMAIL_USER, GMAIL_PASS)
@@ -110,13 +116,12 @@ def sync():
         msg = email.message_from_bytes(data[0][1])
         
         subject = clean_title(decode_mime_header(msg["Subject"]))
-        print(f"Processing: {subject}")
+        print(f"Processing Email: {subject}")
         
         content = ""
         attachments_list = []
         primary_image = ""
 
-        # חילוץ תוכן וקבצים
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
@@ -125,7 +130,6 @@ def sync():
                 if content_type == "text/plain" and "attachment" not in content_disposition:
                     try:
                         raw_text = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                        # מחלצים קישורי דרייב לפני שמנקים את החתימה
                         attachments_list.extend(extract_drive_links(raw_text))
                         content = clean_signature(raw_text)
                     except: continue
@@ -151,7 +155,6 @@ def sync():
             attachments_list.extend(extract_drive_links(raw_text))
             content = clean_signature(raw_text)
 
-        # יצירת ההודעה
         payload = {
             "title": subject,
             "content": content if content else "",
@@ -168,11 +171,101 @@ def sync():
             print(f"SUCCESS: {subject} synced with {len(attachments_list)} attachments.")
             mail.store(num, '+FLAGS', '\\Deleted')
         else:
-            print(f"ERROR: Status {response.status_code}")
+            print(f"ERROR: Announcement status {response.status_code}")
 
     mail.expunge()
     mail.logout()
-    print("Done.")
+    print("Gmail Sync Finished.")
+
+# ==========================================
+# לוגיקת סנכרון Nedarim -> PaymentForms
+# ==========================================
+
+def get_existing_form_titles():
+    headers = {"api_key": API_KEY, "Content-Type": "application/json"}
+    try:
+        response = requests.get(PAYMENT_FORMS_URL, headers=headers)
+        if response.status_code == 200:
+            return {r.get("title") for r in response.json() if r.get("title")}
+    except Exception as e:
+        print(f"DEBUG: Base44 fetch error: {e}")
+    return set()
+
+def insert_new_form(title, url, display_order):
+    headers = {"api_key": API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "title": title,
+        "url": url,
+        "display_order": display_order
+    }
+    try:
+        res = requests.post(PAYMENT_FORMS_URL, headers=headers, json=payload)
+        if res.status_code in [200, 201]:
+            print(f"[SUCCESS] Added Form: {title}")
+        else:
+            print(f"[FAILED] Form {title} status: {res.status_code}")
+    except Exception as e:
+        print(f"DEBUG: Form insert error: {e}")
+
+def sync_nedarim_forms():
+    print("--- Starting Nedarim Forms Sync ---")
+    existing_titles = get_existing_form_titles()
+    print(f"Found {len(existing_titles)} existing forms in Base44.")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(NEDARIM_URL)
+        
+        try:
+            page.wait_for_selector("#GroupeMainBt", timeout=15000)
+            page.wait_for_timeout(2000)
+            
+            raw_items = page.evaluate("""() => {
+                const data = [];
+                const rows = document.querySelectorAll('#GroupeMainBt .GroupeDivCss');
+                rows.forEach((row, index) => {
+                    const btn = row.querySelector('.GroupeBtCss') || row.querySelector('input[type="button"]');
+                    if (btn) {
+                        data.push({
+                            title: (btn.value || btn.innerText || "").trim(),
+                            fullText: (row.innerText || "").trim(),
+                            order: index + 1
+                        });
+                    }
+                });
+                return data;
+            }""")
+        except Exception as e:
+            print(f"Playwright Scrape Failed: {e}")
+            raw_items = []
+        browser.close()
+
+    for item in raw_items:
+        title = item["title"]
+        full_text = item["fullText"]
+        order = item["order"]
+        
+        if title in existing_titles:
+            continue
+            
+        amount_match = re.search(r'(?:₪|ש"ח)\s*([\d,]+)', full_text) or re.search(r'([\d,]+)\s*(?:₪|ש"ח)', full_text)
+        amount = amount_match.group(1).replace(",", "") if amount_match else None
+        
+        encoded_groupe = urllib.parse.quote(title)
+        final_url = f"https://www.matara.pro/nedarimplus/online/?mosad=7004882&groupe={encoded_groupe}"
+        if amount:
+            final_url += f"&amount={amount}"
+            
+        print(f"[NEW FORM] Detected: {title}")
+        insert_new_form(title, final_url, order)
+    print("Nedarim Sync Finished.")
+
+# ==========================================
+# Orchestrator
+# ==========================================
 
 if __name__ == "__main__":
-    sync()
+    sync_gmail_announcements()
+    sync_nedarim_forms()
+    print("All sync operations completed successfully.")
